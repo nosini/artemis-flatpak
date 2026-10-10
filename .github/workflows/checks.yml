@@ -1,0 +1,70 @@
+name: Checks
+
+# Lints and tests the packaging scripts and workflows. Unlike the Flatpak
+# build, this also runs in the template repository.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+
+      - name: Lint shell scripts
+        run: shellcheck scripts/*.sh scripts/tests/*.sh tests/check-installed.sh launcher/artemis
+
+      - name: Lint workflows
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12 "$RUNNER_TEMP"
+          "$RUNNER_TEMP/actionlint" -color
+
+      - name: Parse the manifest and metadata files
+        run: |
+          pip install -q pyyaml
+          python - <<'EOF'
+          import glob, json, xml.etree.ElementTree as ET, yaml
+          for path in glob.glob("*.yml") + glob.glob(".github/**/*.yml", recursive=True):
+              yaml.safe_load(open(path))
+          for path in glob.glob("*.json"):
+              json.load(open(path))
+          for path in glob.glob("*.xml") + glob.glob("*.svg"):
+              ET.parse(path)
+          EOF
+
+      - name: Test the update script
+        run: bash scripts/tests/test-update-upstream.sh
+
+      - name: Test the .NET dependency generator
+        run: bash scripts/tests/test-generate-dotnet-deps.sh
+
+  publishing:
+    runs-on: ubuntu-24.04
+    container:
+      # The image the publish job uses, with flatpak, ostree and gpg.
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Test the publishing script
+        run: bash scripts/tests/test-prepare-repository.sh

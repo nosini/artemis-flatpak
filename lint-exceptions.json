@@ -1,0 +1,9 @@
+{
+  "eu.nosini.Artemis": {
+    "appid-url-not-reachable": "nosini.eu has no website yet; the linter requires https://nosini.eu to answer.",
+    "appstream-external-screenshot-url": "Self-hosted repository: screenshots stay at their upstream URLs instead of Flathub's media mirror.",
+    "appstream-screenshots-not-mirrored-in-ostree": "Self-hosted repository: no screenshots ref is published.",
+    "finish-args-own-name-org.kde.StatusNotifierItem-2-0": "Avalonia's tray icon owns org.kde.StatusNotifierItem-<pid>-<n> instead of using its unique bus name; without the name, Artemis has no tray icon.",
+    "module-artemis-checker-tracks-commits": "Artemis has no Git tags; the checker follows the published releases on Artemis's update server, which name the release commit."
+  }
+}

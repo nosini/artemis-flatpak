@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>eu.nosini.Artemis</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>PolyForm-Noncommercial-1.0.0</project_license>
+  <name>Artemis</name>
+  <summary>Control the RGB lighting of all your devices</summary>
+  <developer id="com.artemis-rgb">
+    <name>Artemis RGB</name>
+  </developer>
+  <description>
+    <p>
+      Artemis controls the RGB lighting of keyboards, mice, headsets, LED
+      strips and other devices from many brands together. Lay out your devices
+      on a surface that matches your desk, then build profiles from layers of
+      effects that react to games, audio and other data.
+    </p>
+    <ul>
+      <li>Profiles made of layers, folders, effects and conditions</li>
+      <li>Node scripts and data bindings that link lighting to game and system data</li>
+      <li>Device and effect plugins, profiles and layouts from the Workshop</li>
+      <li>Works with device servers such as OpenRGB</li>
+    </ul>
+    <p>
+      This is an unofficial Flatpak build of the upstream project. Its
+      built-in updater is turned off; Flatpak updates it instead.
+    </p>
+  </description>
+  <launchable type="desktop-id">eu.nosini.Artemis.desktop</launchable>
+  <url type="homepage">https://artemis-rgb.com/</url>
+  <url type="bugtracker">https://github.com/Artemis-RGB/Artemis/issues</url>
+  <url type="help">https://wiki.artemis-rgb.com/</url>
+  <url type="vcs-browser">https://github.com/Artemis-RGB/Artemis</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>The surface editor, which arranges devices like on the desk</caption>
+      <image>https://wiki.artemis-rgb.com/screenshots/surface-editor.png</image>
+    </screenshot>
+  </screenshots>
+  <branding>
+    <color type="primary" scheme_preference="light">#9fe0d2</color>
+    <color type="primary" scheme_preference="dark">#174a41</color>
+  </branding>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.2026.0101.2" date="2026-01-01"/>
+  </releases>
+</component>

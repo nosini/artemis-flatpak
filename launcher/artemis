@@ -1,0 +1,4 @@
+#!/bin/sh
+# Flatpak updates the app, and its files are read-only, so Artemis's own
+# updater is switched off (patches/0001-disable-updating-argument.patch).
+exec /app/lib/artemis/Artemis.UI.Linux --disable-updating "$@"

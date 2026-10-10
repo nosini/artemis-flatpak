@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Artemis
+Comment=Control the RGB lighting of all your devices
+Icon=eu.nosini.Artemis
+Exec=artemis
+Terminal=false
+StartupNotify=true
+Categories=Settings;HardwareSettings;
+Keywords=RGB;LED;lighting;keyboard;mouse;OpenRGB;

@@ -1,0 +1,213 @@
+name: Flatpak
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flatpak-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  APP_ID: eu.nosini.Artemis
+  # Title of the published repository, and the remote name and file names
+  # users install from.
+  APP_NAME: Artemis
+  REMOTE_NAME: artemis
+  FLATPAK_BRANCH: stable
+
+jobs:
+  setup:
+    # The template itself has nothing to build.
+    if: github.repository != 'nosini/flatpak-template'
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.arches.outputs.matrix }}
+      publish: ${{ steps.arches.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Like Flathub, build x86_64 and aarch64 unless flathub.json limits the
+      # architectures with only-arches or skip-arches.
+      - name: Select architectures
+        id: arches
+        env:
+          PUBLISH: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.PUBLISH_FLATPAK == 'true' }}
+        run: |
+          config=$(cat flathub.json 2>/dev/null || echo '{}')
+          matrix=$(jq -c '
+            ."only-arches" as $only | (."skip-arches" // []) as $skip
+            | [{arch: "x86_64", runner: "ubuntu-24.04"}, {arch: "aarch64", runner: "ubuntu-24.04-arm"}]
+            | map(select(($only == null or (.arch | IN($only[]))) and (.arch | IN($skip[]) | not)))
+          ' <<< "$config")
+          test "$matrix" != '[]'
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: setup
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+      fail-fast: false
+    runs-on: ${{ matrix.runner }}
+    container:
+      # Keep the tag in step with the manifest's runtime-version.
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
+      # Bubblewrap needs namespaces unavailable in an ordinary Docker container.
+      options: --privileged
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - name: Lint the manifest and metainfo
+        run: |
+          flatpak-builder-lint --gha-format --exceptions --user-exceptions lint-exceptions.json \
+            manifest "$APP_ID.yml"
+          flatpak-builder-lint --gha-format appstream "$APP_ID.metainfo.xml"
+
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: ${{ env.APP_ID }}.yml
+          branch: ${{ env.FLATPAK_BRANCH }}
+          arch: ${{ matrix.arch }}
+          build-dir: build-dir
+          repo-dir: repo
+          bundle: ${{ env.REMOTE_NAME }}-${{ matrix.arch }}.flatpak
+          artifact-name: ${{ env.REMOTE_NAME }}-${{ matrix.arch }}
+
+      - name: Lint the exported build
+        run: |
+          flatpak-builder-lint --gha-format --exceptions --user-exceptions lint-exceptions.json \
+            repo repo
+
+      - name: Check the installed app against its runtime
+        env:
+          FLATPAK_ARCH: ${{ matrix.arch }}
+        run: bash scripts/test-installed.sh
+
+      - name: Pack the tested repository
+        if: needs.setup.outputs.publish == 'true'
+        run: tar -cf "repo-${{ matrix.arch }}.tar" repo
+
+      - uses: actions/upload-artifact@v7
+        if: needs.setup.outputs.publish == 'true'
+        with:
+          name: repo-${{ matrix.arch }}
+          path: repo-${{ matrix.arch }}.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  # Signing runs in its own job, so the key is never present where the
+  # upstream build ran.
+  publish:
+    needs: [setup, build]
+    if: needs.setup.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: repo-*
+          path: inputs
+          merge-multiple: true
+
+      - name: Unpack the tested repositories
+        run: |
+          for archive in inputs/repo-*.tar; do
+            arch=$(basename "$archive" .tar)
+            mkdir "inputs/$arch"
+            tar -xf "$archive" -C "inputs/$arch"
+          done
+
+      - name: Import signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$GPG_PRIVATE_KEY" ]]; then
+            echo 'Set FLATPAK_GPG_PRIVATE_KEY before enabling PUBLISH_FLATPAK.' >&2
+            exit 1
+          fi
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          key=$(gpg --batch --list-secret-keys --with-colons | awk -F: '$1 == "fpr" && !key { key = $10 } END { print key }')
+          test -n "$key"
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          echo "GPG_KEY=$key" >> "$GITHUB_ENV"
+
+      - name: Sign and prepare the repository
+        env:
+          REPO_URL: ${{ vars.FLATPAK_REPO_URL || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
+          HOMEPAGE: ${{ github.server_url }}/${{ github.repository }}
+          KEEP_HISTORY: ${{ vars.FLATPAK_KEEP_HISTORY != 'false' }}
+        run: bash scripts/prepare-repository.sh inputs/repo-*/repo
+
+      # A client that only knows the public key must accept the summary, the
+      # app and the software catalog of every architecture. Flatpak only
+      # loads the summaries of the runner's own architecture when updating
+      # catalogs, so the catalog commits are pulled with OSTree, which
+      # rejects them unless they are signed.
+      - name: Verify the signed repository
+        run: |
+          public_key_file="$RUNNER_TEMP/signing-public-key.gpg"
+          gpg --batch --export --export-options export-minimal "$GPG_KEY" > "$public_key_file"
+          test -s "$public_key_file"
+          flatpak --user remote-add --gpg-import="$public_key_file" signed-test "$PWD/signed-repo"
+          verify_repo="$RUNNER_TEMP/verify-repo"
+          ostree --repo="$verify_repo" init --mode=bare-user-only
+          ostree --repo="$verify_repo" remote add --set=gpg-verify-summary=true \
+            --gpg-import="$public_key_file" signed-test "file://$PWD/signed-repo"
+          for arch in $(ostree --repo=signed-repo refs | sed -n "s|^app/$APP_ID/\([^/]*\)/.*|\1|p"); do
+            flatpak --user remote-ls --arch="$arch" signed-test | grep -F "$APP_ID"
+            ostree --repo="$verify_repo" pull signed-test "appstream2/$arch"
+            ostree --repo="$verify_repo" cat "signed-test:appstream2/$arch" /appstream.xml \
+              | grep -qF "<id>$APP_ID</id>"
+          done
+          flatpak --user remote-delete signed-test
+          rm -rf "$verify_repo"
+
+      - name: Remove imported key
+        if: always()
+        run: |
+          if [[ -d "$RUNNER_TEMP/gnupg" ]]; then
+            GNUPGHOME="$RUNNER_TEMP/gnupg" gpgconf --kill all || true
+            rm -rf "$RUNNER_TEMP/gnupg"
+          fi
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: signed-repo
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

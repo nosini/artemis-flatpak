@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flatpak packaging <git@nosini.eu>
+Date: Sat, 10 Oct 2026 00:57:47 +0000
+Subject: [PATCH] Updating - Add a --disable-updating startup argument
+
+Installations managed by a package manager, such as the Flatpak, are
+read-only and get their updates from that package manager. With
+--disable-updating, Artemis doesn't look for releases, offer them or
+install pending ones. Workshop entries keep updating as before.
+---
+ .../Services/Updating/UpdateService.cs         | 18 +++++++++++++++---
+ 1 file changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/src/Artemis.UI/Services/Updating/UpdateService.cs b/src/Artemis.UI/Services/Updating/UpdateService.cs
+index e80ae10a..32d2f0dc 100644
+--- a/src/Artemis.UI/Services/Updating/UpdateService.cs
++++ b/src/Artemis.UI/Services/Updating/UpdateService.cs
+@@ -72,6 +72,12 @@ public class UpdateService : IUpdateService
+     /// <inheritdoc />
+     public string Channel { get; private set; } = "master";
+ 
++    /// <summary>
++    ///     Gets a boolean indicating whether updates are disabled with the --disable-updating startup argument, for
++    ///     installations that a package manager keeps up to date
++    /// </summary>
++    private static bool UpdatingDisabled => Constants.StartupArguments.Contains("--disable-updating");
++
+     /// <inheritdoc />
+     public string? PreviousVersion { get; private set; }
+ 
+@@ -81,6 +87,9 @@ public class UpdateService : IUpdateService
+     /// <inheritdoc />
+     public async Task CacheLatestRelease()
+     {
++        if (UpdatingDisabled)
++            return;
++
+         try
+         {
+             IOperationResult<IGetNextReleaseResult> result = await _updatingClient.GetNextRelease.ExecuteAsync(Constants.CurrentVersion, Channel, _updatePlatform);
+@@ -95,6 +104,9 @@ public class UpdateService : IUpdateService
+     /// <inheritdoc />
+     public async Task<bool> CheckForUpdate()
+     {
++        if (UpdatingDisabled)
++            throw new ArtemisUIException("Updates are disabled, use the package manager Artemis was installed with to update it.");
++
+         _logger.Information("Performing auto-update check");
+ 
+         IOperationResult<IGetNextReleaseResult> result = await _updatingClient.GetNextRelease.ExecuteAsync(Constants.CurrentVersion, Channel, _updatePlatform);
+@@ -171,7 +183,7 @@ public class UpdateService : IUpdateService
+         }
+ 
+         // If an update is pending, don't bother with anything else
+-        if (Directory.Exists(Path.Combine(Constants.UpdatingFolder, "pending")))
++        if (!UpdatingDisabled && Directory.Exists(Path.Combine(Constants.UpdatingFolder, "pending")))
+         {
+             _logger.Information("Installing pending update");
+             try
+@@ -198,8 +210,8 @@ public class UpdateService : IUpdateService
+ 
+     private async Task<bool> AutoCheckForUpdates()
+     {
+-        // Don't perform auto-updates if the current version is local
+-        if (Constants.CurrentVersion == "local")
++        // Don't perform auto-updates if the current version is local or updates are disabled
++        if (Constants.CurrentVersion == "local" || UpdatingDisabled)
+             return false;
+         
+         // Don't perform auto-updates if the setting is disabled or an update was found but not yet installed

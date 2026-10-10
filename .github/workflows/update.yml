@@ -1,0 +1,74 @@
+name: Update
+
+on:
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update
+
+env:
+  APP_ID: eu.nosini.Artemis
+  APP_NAME: Artemis
+
+jobs:
+  check:
+    if: github.repository != 'nosini/flatpak-template'
+    runs-on: ubuntu-24.04
+    permissions:
+      # Push the update branch, open its pull request, start its build and,
+      # with AUTO_MERGE_UPDATES, merge it.
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: update/upstream
+    defaults:
+      run:
+        # Unlike the default shell, this one fails on errors inside pipelines.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The whole history, to tell the bot's commits on the update branch
+          # from changes made by people.
+          fetch-depth: 0
+
+      # flatpak-external-data-checker follows each source's x-checker-data,
+      # updates the manifest pins and adds the main source's release to the
+      # metainfo file. For a new Artemis release, check-sources.sh also
+      # regenerates the NuGet sources. update-upstream.sh turns the changes
+      # into a pull request.
+      - name: Check sources and propose updates
+        id: propose
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CHECKER_LOG: ${{ runner.temp }}/checker.log
+        run: bash scripts/update-upstream.sh bash scripts/check-sources.sh
+
+      - name: Merge the update after a successful build
+        # Updates with changes from people are left for review.
+        if: >-
+          steps.propose.outputs.commit && steps.propose.outputs.manual == 'false'
+          && vars.AUTO_MERGE_UPDATES == 'true'
+        env:
+          COMMIT: ${{ steps.propose.outputs.commit }}
+        run: |
+          run=
+          for _ in $(seq 30); do
+            run=$(gh run list --workflow flatpak.yml --commit "$COMMIT" --event workflow_dispatch \
+              --json databaseId --jq '.[0].databaseId // empty')
+            [[ -n "$run" ]] && break
+            sleep 10
+          done
+          test -n "$run"
+          gh run watch "$run" --exit-status --interval 60 > /dev/null
+          gh pr merge "$BRANCH" --squash --delete-branch --match-head-commit "$COMMIT"
+          # The merge was made with GITHUB_TOKEN too, so start the publishing
+          # build on main explicitly.
+          gh workflow run flatpak.yml --ref main
