@@ -110,14 +110,21 @@ flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakr
 
 ## Checking
 
-CI runs the same linter checks as Flathub. Run them locally with:
+CI uses Flathub's manifest and exported-repository linter. It validates the
+metainfo without network access, so an unreachable upstream website or
+screenshot server cannot fail that check. Run the checks locally with:
 
 ```sh
 alias lint='flatpak run --command=flatpak-builder-lint org.flatpak.Builder'
 lint --exceptions --user-exceptions lint-exceptions.json manifest eu.nosini.Artemis.yml
-lint appstream eu.nosini.Artemis.metainfo.xml
+flatpak run --command=appstreamcli org.flatpak.Builder validate --no-net --explain \
+  eu.nosini.Artemis.metainfo.xml
 lint --exceptions --user-exceptions lint-exceptions.json repo repo
 ```
+
+To check live links and screenshot availability separately, run
+`lint appstream eu.nosini.Artemis.metainfo.xml`. This needs the upstream
+websites to be reachable.
 
 Only add an exception when the rule doesn't apply to a package published
 outside Flathub, and say why in `lint-exceptions.json`.

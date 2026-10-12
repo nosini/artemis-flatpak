@@ -93,11 +93,13 @@ jobs:
           persist-credentials: false
           submodules: true
 
-      - name: Lint the manifest and metainfo
+      - name: Lint the manifest and validate metainfo
         run: |
           flatpak-builder-lint --gha-format --exceptions --user-exceptions lint-exceptions.json \
             manifest "$APP_ID.yml"
-          flatpak-builder-lint --gha-format appstream "$APP_ID.metainfo.xml"
+          # Validate metadata without making upstream website availability a
+          # prerequisite for building the package.
+          appstreamcli validate --no-net --explain "$APP_ID.metainfo.xml"
 
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
