@@ -53,6 +53,9 @@ jobs:
       - name: Test the .NET dependency generator
         run: bash scripts/tests/test-generate-dotnet-deps.sh
 
+      - name: Test release tag classification and creation
+        run: python scripts/tests/test-release-workflow.py
+
   publishing:
     runs-on: ubuntu-24.04
     container:
