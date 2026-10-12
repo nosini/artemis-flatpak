@@ -1,8 +1,8 @@
 name: Flatpak
 
 on:
-  push:
-    branches: [main]
+  release:
+    types: [published]
   pull_request:
   workflow_dispatch:
 
@@ -32,6 +32,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          # For release events, github.sha is the tagged commit.
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       # Like Flathub, build x86_64 and aarch64 unless flathub.json limits the
@@ -39,7 +41,10 @@ jobs:
       - name: Select architectures
         id: arches
         env:
-          PUBLISH: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.PUBLISH_FLATPAK == 'true' }}
+          PUBLISH: >-
+            ${{ vars.PUBLISH_FLATPAK == 'true' &&
+                ((github.event_name == 'release' && !github.event.release.prerelease) ||
+                 (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
         run: |
           config=$(cat flathub.json 2>/dev/null || echo '{}')
           matrix=$(jq -c '
@@ -69,6 +74,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
           submodules: true
 
@@ -124,6 +130,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - uses: actions/download-artifact@v8

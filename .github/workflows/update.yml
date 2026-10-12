@@ -69,6 +69,3 @@ jobs:
           test -n "$run"
           gh run watch "$run" --exit-status --interval 60 > /dev/null
           gh pr merge "$BRANCH" --squash --delete-branch --match-head-commit "$COMMIT"
-          # The merge was made with GITHUB_TOKEN too, so start the publishing
-          # build on main explicitly.
-          gh workflow run flatpak.yml --ref main

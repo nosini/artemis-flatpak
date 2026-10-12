@@ -164,9 +164,12 @@ cleared with `flatpak permission-reset eu.nosini.Artemis`.
 
 ## GitHub Actions
 
-`.github/workflows/flatpak.yml` runs for pushes to `main`, pull requests and
-manual runs. For each architecture, it lints the manifest and metainfo,
-builds with [flatpak-github-actions](https://github.com/flatpak/flatpak-github-actions),
+`.github/workflows/flatpak.yml` runs when a GitHub release is published,
+for pull requests and on manual runs. Pushes to `main` run the packaging
+checks without building the app. Release builds use the tagged commit of
+this packaging repository. For each architecture, it lints the manifest and
+metainfo, builds with
+[flatpak-github-actions](https://github.com/flatpak/flatpak-github-actions),
 lints the exported build, runs the installed-app checks and uploads an
 installable bundle as an artifact. Install a downloaded artifact with
 `flatpak install --user artemis-x86_64.flatpak`. Bundles are unsigned and
@@ -182,10 +185,14 @@ them several times to a local web server.
 
 ### Publishing
 
-On `main`, when the repository variable `PUBLISH_FLATPAK` is `true`, the
-workflow also publishes a signed Flatpak repository to GitHub Pages. A
-separate job, which never runs upstream build code, downloads the published
-repository and checks it against the signing key. It adds the tested builds
+When the repository variable `PUBLISH_FLATPAK` is `true`, publishing a
+stable GitHub release builds and publishes a signed Flatpak repository to
+GitHub Pages. A manual Flatpak run on `main` also publishes, so packaging
+fixes can be shipped without a new upstream release. Pull request builds,
+prerelease builds and manual builds on other refs produce bundle artifacts
+without publishing. A separate job, which never runs upstream build code,
+downloads the published repository and checks it against the signing key.
+It adds the tested builds
 of all architectures as new signed commits, generates static deltas, signs a
 new software catalog and summary, and writes `artemis.flatpakrepo` and
 `artemis.flatpakref` with the public key embedded. Both files take the app's
@@ -209,12 +216,15 @@ including the trailing slash.
 
 To set publishing up:
 
-1. In **Settings → Pages**, select **GitHub Actions** as the source.
+1. In **Settings → Pages**, select **GitHub Actions** as the source. If the
+   `github-pages` environment restricts deployment branches and tags, allow
+   the release tags as well as `main` for manual publishing.
 2. Store the signing key as the secret `FLATPAK_GPG_PRIVATE_KEY` (see
    below).
 3. Set the variable:
    `gh variable set PUBLISH_FLATPAK --body true --repo nosini/artemis-flatpak`.
-4. Run the workflow on `main`, or push to it.
+4. Publish a GitHub release with a tag pointing to the packaging commit to
+   build, or run the Flatpak workflow manually on `main`.
 
 ### Signing key
 
@@ -272,15 +282,16 @@ commit (see [.NET dependencies](#net-dependencies)). It does this in Flathub's
 CI image, which can run the SDK in a privileged container. The workflow
 pushes the changes to the `update/upstream` branch, opens a pull request and
 starts the Flatpak build of that branch. Its result shows on the pull
-request. Merging the pull request publishes the update.
+request. After merging, publish a GitHub release at the merged commit to
+build and publish the update.
 
 The workflow needs **Allow GitHub Actions to create and approve pull
 requests** under **Settings → Actions → General**.
 
 To merge updates without review, set the variable `AUTO_MERGE_UPDATES` to
-`true`. The workflow then waits for the build, merges the pull request when
-the build and the installed-app checks pass, and starts the publishing build
-on `main`. A failed build leaves the pull request open.
+`true`. The workflow then waits for the build and merges the pull request
+when the build and the installed-app checks pass. Publish a GitHub release
+afterwards to ship it. A failed build leaves the pull request open.
 
 Changes pushed to `update/upstream` by anyone but the workflow are kept:
 while the pull request is open, later runs commit newer releases on top of
