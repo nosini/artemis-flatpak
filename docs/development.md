@@ -190,20 +190,50 @@ the manifest and metadata files parse, and runs the tests in
 `scripts/tests/`. The publishing test makes small fake builds and publishes
 them several times to a local web server.
 
+### Build cache
+
+CI restores `.flatpak-builder`, including downloaded sources and completed
+module results. Flatpak checks the inputs and rebuilds affected modules
+when sources, NuGet dependencies, patches or the SDK change. Lint and
+installed-app checks still run on every build, and the cache is saved only
+after they pass. Artemis compiles managed .NET code, so its benefit comes
+from source downloads and module reuse rather than the C/C++ compiler cache.
+
+Each run saves a fresh snapshot, separated by app ID, architecture, Flatpak
+branch and build workflow version, which includes the CI container image.
+The next run restores the newest compatible snapshot. To start a new cache
+namespace, bump `flatpak-v1` in both the key and restore prefix in the
+workflow. Cache misses build normally.
+
+GitHub lets tags and pull requests restore the default branch's cache,
+but caches from one tag cannot be restored by another tag. To populate a
+shared cache without publishing or creating a release, run the Flatpak
+workflow on `main` with **cache_only** selected, or run from this checkout:
+
+```sh
+gh workflow run flatpak.yml --ref main -f cache_only=true
+```
+
+Refresh it before releases when needed. GitHub removes caches unused for
+more than seven days and evicts older entries when the repository's storage
+limit is reached; see its [cache access and retention rules](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
+
 ### Publishing
 
 When the repository variable `PUBLISH_FLATPAK` is `true`, pushing a
 stable version tag builds and publishes a signed Flatpak repository to
-GitHub Pages. A manual Flatpak run on `main` also publishes, so packaging
-fixes can be shipped without a new upstream release. Pull request builds,
+GitHub Pages. A manual Flatpak run on `main` without **cache_only** also
+publishes, so packaging fixes can be shipped without a new upstream release.
+Pull request builds,
 prerelease builds and manual builds on other branches produce bundle
 artifacts without publishing. After a tag build passes, the workflow
 creates its GitHub Release using the runner's `GITHUB_TOKEN` and attaches
 the tested `artemis-x86_64.flatpak` bundle. Stable publication must complete
 the Pages deployment before release creation. If publication is disabled,
 tag builds still create GitHub Releases with their bundles. Manual runs on
-version tags follow the same release flow. Reruns replace assets on an
-existing release and finish publishing a draft left by an interrupted run.
+version tags follow the same release flow unless **cache_only** is selected.
+Reruns replace assets on an existing release and finish publishing a draft
+left by an interrupted run.
 Prerelease tags produce GitHub prereleases and cannot become the latest
 stable release.
 

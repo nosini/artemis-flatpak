@@ -68,15 +68,19 @@ class ReleaseWorkflowTests(unittest.TestCase):
             ("push", "refs/heads/main", "", "true", False),
             ("workflow_dispatch", "refs/heads/main", "", "true", True),
             ("workflow_dispatch", "refs/heads/update/upstream", "", "true", False),
+            ("workflow_dispatch", "refs/tags/v1.2026.0101.2", "true", "true", True),
             ("workflow_dispatch", "refs/tags/v1.2026.0101.2-rc1", "false", "true", False),
             ("pull_request", "refs/pull/1/merge", "", "true", False),
         ):
-            with self.subTest(event=event, ref=ref, enabled=enabled):
-                self.assertEqual(evaluate(
-                    expression, github=NS(event_name=event, ref=ref),
-                    steps=NS(release=NS(outputs=NS(stable=stable))),
-                    vars=NS(PUBLISH_FLATPAK=enabled),
-                ), expected)
+            for cache_only in (False, True):
+                with self.subTest(event=event, ref=ref, enabled=enabled,
+                                  cache_only=cache_only):
+                    self.assertEqual(evaluate(
+                        expression, github=NS(event_name=event, ref=ref),
+                        inputs=NS(cache_only=cache_only),
+                        steps=NS(release=NS(outputs=NS(stable=stable))),
+                        vars=NS(PUBLISH_FLATPAK=enabled),
+                    ), expected and not cache_only)
 
     def test_release_waits_for_validation_and_required_deployment(self):
         expression = WORKFLOW["jobs"]["release"]["if"]
@@ -93,13 +97,16 @@ class ReleaseWorkflowTests(unittest.TestCase):
             ("true", "success", "success", "success", "success", True, "refs/tags/v1", False),
             ("true", "success", "success", "success", "success", False, "refs/heads/main", False),
         ):
-            with self.subTest(publish=publish, build=build, signing=signing, deploy=deploy, ref=ref):
-                self.assertEqual(evaluate(
-                    expression, github=NS(ref=ref), cancelled=lambda: cancelled,
-                    needs=NS(setup=NS(result=setup, outputs=NS(publish=publish)),
-                             build=NS(result=build), publish=NS(result=signing),
-                             deploy=NS(result=deploy)),
-                ), expected)
+            for cache_only in (False, True):
+                with self.subTest(publish=publish, build=build, signing=signing,
+                                  deploy=deploy, ref=ref, cache_only=cache_only):
+                    self.assertEqual(evaluate(
+                        expression, github=NS(ref=ref), cancelled=lambda: cancelled,
+                        inputs=NS(cache_only=cache_only),
+                        needs=NS(setup=NS(result=setup, outputs=NS(publish=publish)),
+                                 build=NS(result=build), publish=NS(result=signing),
+                                 deploy=NS(result=deploy)),
+                    ), expected and not cache_only)
 
     def release_commands(self, *, stable="true", exists="false", fail="", bundle=True):
         if bundle:

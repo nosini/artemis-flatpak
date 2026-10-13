@@ -5,6 +5,11 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      cache_only:
+        description: Build and test without publishing (warm the shared cache on main)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -57,7 +62,7 @@ jobs:
         id: arches
         env:
           PUBLISH: >-
-            ${{ vars.PUBLISH_FLATPAK == 'true' &&
+            ${{ vars.PUBLISH_FLATPAK == 'true' && !inputs.cache_only &&
                 ((startsWith(github.ref, 'refs/tags/v') && steps.release.outputs.stable == 'true') ||
                  (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
         run: |
@@ -101,6 +106,18 @@ jobs:
           # prerequisite for building the package.
           appstreamcli validate --no-net --explain "$APP_ID.metainfo.xml"
 
+      # The workflow hash separates build environments, including image changes.
+      # A fresh snapshot per run includes changes to NuGet sources, patches and
+      # local files, even when the top-level manifest is unchanged.
+      - name: Restore the Flatpak build cache
+        id: build-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .flatpak-builder
+          key: flatpak-v1-${{ runner.os }}-${{ matrix.arch }}-${{ env.APP_ID }}-${{ env.FLATPAK_BRANCH }}-${{ hashFiles('.github/workflows/flatpak.yml') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            flatpak-v1-${{ runner.os }}-${{ matrix.arch }}-${{ env.APP_ID }}-${{ env.FLATPAK_BRANCH }}-${{ hashFiles('.github/workflows/flatpak.yml') }}-
+
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           manifest-path: ${{ env.APP_ID }}.yml
@@ -110,6 +127,11 @@ jobs:
           repo-dir: repo
           bundle: ${{ env.REMOTE_NAME }}-${{ matrix.arch }}.flatpak
           artifact-name: ${{ env.REMOTE_NAME }}-${{ matrix.arch }}
+          # Keep ccache enabled; restore and save in the surrounding steps.
+          cache: true
+          restore-cache: false
+          save-cache: false
+          state-dir: .flatpak-builder
 
       - name: Lint the exported build
         run: |
@@ -120,6 +142,12 @@ jobs:
         env:
           FLATPAK_ARCH: ${{ matrix.arch }}
         run: bash scripts/test-installed.sh
+
+      - name: Save the tested Flatpak build cache
+        uses: actions/cache/save@v6
+        with:
+          path: .flatpak-builder
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
 
       - name: Pack the tested repository
         if: needs.setup.outputs.publish == 'true'
@@ -241,7 +269,7 @@ jobs:
   release:
     needs: [setup, build, publish, deploy]
     if: >-
-      ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') &&
+      ${{ !cancelled() && !inputs.cache_only && startsWith(github.ref, 'refs/tags/v') &&
           needs.setup.result == 'success' && needs.build.result == 'success' &&
           ((needs.setup.outputs.publish == 'true' && needs.publish.result == 'success' &&
             needs.deploy.result == 'success') ||
