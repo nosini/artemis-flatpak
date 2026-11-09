@@ -53,7 +53,7 @@ modules:
     sources:
       - type: git
         url: https://github.com/Artemis-RGB/Artemis.git
-        commit: 46511022d6eb3c0be72b9aae196495666089ed84
+        commit: 8d2927a05436f6a79ef5ad3ea741bb5ac43ff7eb
         # Artemis has no release tags. Its update server lists the published
         # releases with their version and commit.
         x-checker-data:
