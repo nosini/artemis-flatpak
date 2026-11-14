@@ -16,6 +16,9 @@ set -euo pipefail
 # with `flatpak update --commit`. Set KEEP_HISTORY=false to start over.
 : "${HISTORY_DEPTH:=5}"
 : "${KEEP_HISTORY:=true}"
+# Every URL below is completed with a path, so accept the address with or
+# without its trailing slash.
+REPO_URL=${REPO_URL%/}/
 if (( $# == 0 )); then
   echo "Usage: $0 REPO..." >&2
   exit 2
@@ -29,6 +32,18 @@ key_file=$(mktemp)
 trap 'rm -f "$key_file"' EXIT
 gpg --batch --export --export-options export-minimal "$GPG_KEY" > "$key_file"
 test -s "$key_file"
+
+# app_version REPO REF: the newest release in the app's metainfo, which is the
+# version the app reports and the tag names.
+app_version() {
+  ostree --repo="$1" cat "$2" "/files/share/metainfo/$APP_ID.metainfo.xml" \
+    | python3 -c '
+import sys
+import xml.etree.ElementTree as ET
+releases = ET.parse(sys.stdin).getroot().findall("releases/release")
+print(releases[0].get("version") if releases else "")
+'
+}
 
 ostree --repo=signed-repo init --mode=archive-z2
 
@@ -63,16 +78,44 @@ if [[ "$KEEP_HISTORY" == true ]]; then
   esac
 fi
 
+# Builds become children of the published commits, so an older one would
+# replace the head and downgrade every user on their next update. Refuse it,
+# for example for a rerun of an earlier tag or a packaging revision before the
+# current version.
+published_ref=$(ostree --repo=signed-repo refs | grep -m1 "^app/$APP_ID/" || true)
+if [[ -n "$published_ref" ]]; then
+  published_version=$(app_version signed-repo "$published_ref")
+  for input in "$@"; do
+    input_ref=$(ostree --repo="$input" refs | grep -m1 "^app/$APP_ID/" || true)
+    if [[ -z "$input_ref" || -z "$published_version" ]]; then
+      continue
+    fi
+    input_version=$(app_version "$input" "$input_ref")
+    newest=$(printf '%s\n%s\n' "$published_version" "$input_version" \
+      | sort -V | tail -n1)
+    if [[ -n "$input_version" && "$newest" != "$input_version" ]]; then
+      echo "Refusing to publish $input_version over the published $published_version." >&2
+      exit 1
+    fi
+  done
+fi
+
 # Commit every app and extension ref, including the Locale and Debug
 # extensions flatpak-builder exports automatically. A ref whose content
 # didn't change keeps its published commit.
 declare -A built=()
 for input in "$@"; do
+  refs=$(ostree --repo="$input" refs | grep -E '^(app|runtime)/' || true)
+  if [[ -z "$refs" ]]; then
+    # Otherwise the refs the input should have would be dropped below.
+    echo "$input contains no app or runtime refs; refusing to publish." >&2
+    exit 1
+  fi
   while read -r ref; do
     built[$ref]=1
     flatpak build-commit-from --untrusted --no-update-summary "${sign[@]}" \
       --src-repo="$input" signed-repo "$ref"
-  done < <(ostree --repo="$input" refs | grep -E '^(app|runtime)/')
+  done <<< "$refs"
 done
 # Refs the new build no longer has, such as a dropped architecture, are
 # removed rather than served with stale content.

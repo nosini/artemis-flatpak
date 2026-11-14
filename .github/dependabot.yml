@@ -1,3 +1,5 @@
+# NuGet packages are pinned in nuget-sources.json, which Dependabot can't
+# regenerate; see ".NET dependencies" in docs/development.md.
 version: 2
 updates:
   - package-ecosystem: github-actions

@@ -6,8 +6,8 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
-      cache_only:
-        description: Build and test without publishing (warm the shared cache on main)
+      publish:
+        description: Publish this build to the stable repository (main or a stable tag)
         type: boolean
         default: false
 
@@ -15,7 +15,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: flatpak-${{ github.ref }}
+  # Runs that can publish share one group across refs, so two of them never
+  # sign and deploy competing repositories built from different published
+  # heads. A manual run without the publish input is only a build and cache
+  # warm-up, so it gets a group of its own and can't cancel a publication.
+  group: >-
+    flatpak-${{ ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+                  inputs.publish == true) && 'publish' || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -25,6 +31,9 @@ env:
   APP_NAME: Artemis
   REMOTE_NAME: artemis
   FLATPAK_BRANCH: stable
+  # Cache namespace. Bump it to start over; the key and the restore prefix
+  # both use it.
+  CACHE_PREFIX: flatpak-v1
 
 jobs:
   setup:
@@ -36,7 +45,7 @@ jobs:
       publish: ${{ steps.arches.outputs.publish }}
       stable: ${{ steps.release.outputs.stable }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Tag builds and manual reruns use the event's exact commit.
           ref: ${{ github.sha }}
@@ -56,16 +65,48 @@ jobs:
           fi
           echo "stable=$stable" >> "$GITHUB_OUTPUT"
 
+      # The release title and the published version come from the tag, while
+      # the metainfo carries the version users and software centers see. A tag
+      # whose version wasn't bumped would publish the old version under the
+      # new name, so compare the tag with the metadata here.
+      - name: Check the release tag against the app version
+        if: steps.release.outputs.stable == 'true'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=${TAG#v}
+          # A numeric suffix is a packaging revision of the same app version.
+          version=${version%%-*}
+          app_version=$(python3 - "$APP_ID" <<'EOF'
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse(f"{sys.argv[1]}.metainfo.xml").getroot()
+          print(root.find("releases/release").get("version"))
+          EOF
+          )
+          if [[ "$version" != "$app_version" ]]; then
+            echo "Tag $TAG does not match the app version $app_version." >&2
+            exit 1
+          fi
+
       # Like Flathub, build x86_64 and aarch64 unless flathub.json limits the
       # architectures with only-arches or skip-arches.
       - name: Select architectures
         id: arches
         env:
           PUBLISH: >-
-            ${{ vars.PUBLISH_FLATPAK == 'true' && !inputs.cache_only &&
+            ${{ vars.PUBLISH_FLATPAK == 'true' &&
+                (github.event_name != 'workflow_dispatch' || inputs.publish) &&
                 ((startsWith(github.ref, 'refs/tags/v') && steps.release.outputs.stable == 'true') ||
                  (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
+          # Publishing is opt-in on manual runs; refuse a request that the
+          # event can't publish instead of building quietly without it.
+          PUBLISH_REQUESTED: ${{ inputs.publish }}
         run: |
+          if [[ "$PUBLISH_REQUESTED" == true && "$PUBLISH" != true ]]; then
+            echo 'publish needs PUBLISH_FLATPAK=true and a stable version tag or a run on main.' >&2
+            exit 1
+          fi
           config=$(cat flathub.json 2>/dev/null || echo '{}')
           matrix=$(jq -c '
             ."only-arches" as $only | (."skip-arches" // []) as $skip
@@ -84,15 +125,15 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.runner }}
     container:
-      # Keep the tag in step with the manifest's runtime-version.
-      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
+      # Keep the tag and digest in step with the manifest's runtime-version.
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08@sha256:6ed6921bb5a9e1a916989971844f159b854b7b225880c381fa34f7a158863039
       # Bubblewrap needs namespaces unavailable in an ordinary Docker container.
       options: --privileged
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -106,19 +147,34 @@ jobs:
           # prerequisite for building the package.
           appstreamcli validate --no-net --explain "$APP_ID.metainfo.xml"
 
-      # The workflow hash separates build environments, including image changes.
-      # A fresh snapshot per run includes changes to NuGet sources, patches and
-      # local files, even when the top-level manifest is unchanged.
+      # The image ships its runtimes in read-only layers, and overlayfs refuses
+      # the directory renames flatpak makes when flatpak-builder updates them
+      # ("Invalid cross-device link", then a crash). Once Flathub has a newer
+      # SDK than the image, every build would fail. Copying the installations
+      # into the container's writable layer makes them updatable.
+      # https://github.com/flatpak/flatpak-github-actions/issues/267
+      - name: Make the preinstalled runtimes updatable
+        run: |
+          for dir in $(flatpak --installations); do
+            cp -a "$dir" "$dir.copy"
+            rm -rf "$dir"
+            mv "$dir.copy" "$dir"
+          done
+
+      # The key covers this workflow and the pinned NuGet sources, so changing
+      # either starts a new snapshot; the container image is pinned by digest,
+      # so a new image changes the workflow too. Downloads and module results
+      # are reused, as is the compiler cache.
       - name: Restore the Flatpak build cache
         id: build-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .flatpak-builder
-          key: flatpak-v1-${{ runner.os }}-${{ matrix.arch }}-${{ env.APP_ID }}-${{ env.FLATPAK_BRANCH }}-${{ hashFiles('.github/workflows/flatpak.yml') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ env.CACHE_PREFIX }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.APP_ID }}-${{ env.FLATPAK_BRANCH }}-${{ hashFiles('.github/workflows/flatpak.yml', 'nuget-sources.json') }}
           restore-keys: |
-            flatpak-v1-${{ runner.os }}-${{ matrix.arch }}-${{ env.APP_ID }}-${{ env.FLATPAK_BRANCH }}-${{ hashFiles('.github/workflows/flatpak.yml') }}-
+            ${{ env.CACHE_PREFIX }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.APP_ID }}-${{ env.FLATPAK_BRANCH }}-
 
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6
         with:
           manifest-path: ${{ env.APP_ID }}.yml
           branch: ${{ env.FLATPAK_BRANCH }}
@@ -127,7 +183,8 @@ jobs:
           repo-dir: repo
           bundle: ${{ env.REMOTE_NAME }}-${{ matrix.arch }}.flatpak
           artifact-name: ${{ env.REMOTE_NAME }}-${{ matrix.arch }}
-          # Keep ccache enabled; restore and save in the surrounding steps.
+          # Keep ccache enabled; restore and save the state directory in the
+          # surrounding steps, so only a passing build is saved.
           cache: true
           restore-cache: false
           save-cache: false
@@ -143,23 +200,30 @@ jobs:
           FLATPAK_ARCH: ${{ matrix.arch }}
         run: bash scripts/test-installed.sh
 
-      - name: Save the tested Flatpak build cache
-        uses: actions/cache/save@v6
-        with:
-          path: .flatpak-builder
-          key: ${{ steps.build-cache.outputs.cache-primary-key }}
-
       - name: Pack the tested repository
         if: needs.setup.outputs.publish == 'true'
         run: tar -cf "repo-${{ matrix.arch }}.tar" repo
 
-      - uses: actions/upload-artifact@v7
+      - name: Upload the tested repository
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: needs.setup.outputs.publish == 'true'
         with:
           name: repo-${{ matrix.arch }}
           path: repo-${{ matrix.arch }}.tar
           retention-days: 1
           if-no-files-found: error
+
+      # Snapshots saved on other refs can only be restored by reruns of the
+      # same ref, and GitHub keeps one pending run per group. Save after the
+      # artifact so a slow upload can't hold back the tested repository.
+      - name: Save the tested Flatpak build cache
+        if: >-
+          steps.build-cache.outputs.cache-hit != 'true' &&
+          github.ref_name == github.event.repository.default_branch
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .flatpak-builder
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
 
   # Signing runs in its own job, so the key is never present where the
   # upstream build ran.
@@ -168,17 +232,17 @@ jobs:
     if: needs.setup.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08@sha256:6ed6921bb5a9e1a916989971844f159b854b7b225880c381fa34f7a158863039
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: repo-*
           path: inputs
@@ -216,10 +280,10 @@ jobs:
         run: bash scripts/prepare-repository.sh inputs/repo-*/repo
 
       # A client that only knows the public key must accept the summary, the
-      # app and the software catalog of every architecture. Flatpak only
-      # loads the summaries of the runner's own architecture when updating
-      # catalogs, so the catalog commits are pulled with OSTree, which
-      # rejects them unless they are signed.
+      # app and its extensions, and the software catalog of every
+      # architecture. Flatpak only loads the summaries of the runner's own
+      # architecture when updating catalogs, so the commits are pulled with
+      # OSTree, which rejects them unless they are signed.
       - name: Verify the signed repository
         run: |
           public_key_file="$RUNNER_TEMP/signing-public-key.gpg"
@@ -228,9 +292,23 @@ jobs:
           flatpak --user remote-add --gpg-import="$public_key_file" signed-test "$PWD/signed-repo"
           verify_repo="$RUNNER_TEMP/verify-repo"
           ostree --repo="$verify_repo" init --mode=bare-user-only
-          ostree --repo="$verify_repo" remote add --set=gpg-verify-summary=true \
+          ostree --repo="$verify_repo" remote add --set=gpg-verify=true \
+            --set=gpg-verify-summary=true \
             --gpg-import="$public_key_file" signed-test "file://$PWD/signed-repo"
-          for arch in $(ostree --repo=signed-repo refs | sed -n "s|^app/$APP_ID/\([^/]*\)/.*|\1|p"); do
+          mapfile -t refs < <(ostree --repo=signed-repo refs | grep -E '^(app|runtime)/')
+          if (( ${#refs[@]} == 0 )); then
+            echo 'The signed repository has no app or runtime refs.' >&2
+            exit 1
+          fi
+          # Every app and extension commit must carry the key's signature.
+          ostree --repo="$verify_repo" pull signed-test "${refs[@]}"
+          arches=$(printf '%s\n' "${refs[@]}" \
+            | sed -n "s|^app/$APP_ID/\([^/]*\)/.*|\1|p" | sort -u)
+          if [[ -z "$arches" ]]; then
+            echo "The signed repository has no $APP_ID refs." >&2
+            exit 1
+          fi
+          for arch in $arches; do
             flatpak --user remote-ls --arch="$arch" signed-test | grep -F "$APP_ID"
             ostree --repo="$verify_repo" pull signed-test "appstream2/$arch"
             ostree --repo="$verify_repo" cat "signed-test:appstream2/$arch" /appstream.xml \
@@ -247,7 +325,7 @@ jobs:
             rm -rf "$RUNNER_TEMP/gnupg"
           fi
 
-      - uses: actions/upload-pages-artifact@v5
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: signed-repo
 
@@ -262,14 +340,35 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
+
+  # The shared remote collects packages only after Pages serves the signed repo.
+  # A separate token is needed because GITHUB_TOKEN cannot dispatch another repo.
+  announce:
+    needs: deploy
+    runs-on: ubuntu-24.04
+    permissions: {}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Announce the publication to the shared remote
+        env:
+          GH_TOKEN: ${{ secrets.FLATPAK_REPO_DISPATCH_TOKEN }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo '::error::Set FLATPAK_REPO_DISPATCH_TOKEN with Contents: write access to nosini/flatpak-repo to notify the shared remote.'
+            exit 1
+          fi
+          gh api --method POST repos/nosini/flatpak-repo/dispatches -f event_type=app-published
 
   # Create the release only after validation and any required Pages deployment.
   # Authentication comes from the runner's GITHUB_TOKEN.
   release:
     needs: [setup, build, publish, deploy]
     if: >-
-      ${{ !cancelled() && !inputs.cache_only && startsWith(github.ref, 'refs/tags/v') &&
+      ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') &&
+          (github.event_name != 'workflow_dispatch' || inputs.publish) &&
           needs.setup.result == 'success' && needs.build.result == 'success' &&
           ((needs.setup.outputs.publish == 'true' && needs.publish.result == 'success' &&
             needs.deploy.result == 'success') ||
@@ -287,7 +386,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: ${{ env.REMOTE_NAME }}-*
           path: bundles

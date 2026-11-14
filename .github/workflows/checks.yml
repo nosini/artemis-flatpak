@@ -18,12 +18,13 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
+          # The runtime's Python.
           python-version: '3.14'
 
       - name: Lint shell scripts
@@ -31,7 +32,13 @@ jobs:
 
       - name: Lint workflows
         run: |
-          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12 "$RUNNER_TEMP"
+          # Pinned by checksum, so a replaced release asset can't run here.
+          tarball=actionlint_1.7.12_linux_amd64.tar.gz
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v1.7.12/$tarball"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/$tarball" \
+            | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -color
 
       - name: Parse the manifest and metadata files
@@ -60,12 +67,12 @@ jobs:
     runs-on: ubuntu-24.04
     container:
       # The image the publish job uses, with flatpak, ostree and gpg.
-      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08@sha256:6ed6921bb5a9e1a916989971844f159b854b7b225880c381fa34f7a158863039
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 

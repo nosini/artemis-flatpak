@@ -192,99 +192,121 @@ them several times to a local web server.
 
 ### Build cache
 
-CI restores `.flatpak-builder`, including downloaded sources and completed
-module results. Flatpak checks the inputs and rebuilds affected modules
-when sources, NuGet dependencies, patches or the SDK change. Lint and
-installed-app checks still run on every build, and the cache is saved only
-after they pass. Artemis compiles managed .NET code, so its benefit comes
-from source downloads and module reuse rather than the C/C++ compiler cache.
+CI restores `.flatpak-builder`, including downloaded sources, completed
+module results and the C/C++ compiler cache. Flatpak checks the inputs and
+rebuilds affected modules when sources, NuGet dependencies, patches or the
+SDK change. Lint and installed-app checks still run on every build, and a
+snapshot is saved only after they pass. Artemis compiles managed .NET code,
+so its benefit comes from source downloads and module reuse rather than the
+C/C++ compiler cache.
 
-Each run saves a fresh snapshot, separated by app ID, architecture, Flatpak
-branch and build workflow version, which includes the CI container image.
-The next run restores the newest compatible snapshot. To start a new cache
-namespace, bump `flatpak-v1` in both the key and restore prefix in the
-workflow. Cache misses build normally.
+The key covers this workflow and `nuget-sources.json`, so changing either
+starts a new snapshot; otherwise the newest earlier snapshot is restored.
+The container image is pinned by digest, so a new image means a workflow
+change and a new key. Downloads are carried over and not pruned when a
+dependency is dropped, so a snapshot grows slowly. To start over, bump
+`CACHE_PREFIX` in the workflow; the key and the restore prefix both use it,
+so they can't drift apart. Cache misses build normally.
 
-GitHub lets tags and pull requests restore the default branch's cache,
-but caches from one tag cannot be restored by another tag. To populate a
-shared cache without publishing or creating a release, run the Flatpak
-workflow on `main` with **cache_only** selected, or run from this checkout:
+Snapshots are saved only on `main`, and only after the tests and the artifact
+upload, because a snapshot saved on a tag or pull request can only be restored
+by reruns of that ref. GitHub removes caches unused for more than seven days
+and evicts older entries when the repository's storage limit is reached; see
+its [cache access and retention rules](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
+
+To populate the cache before a release without publishing, run the workflow
+on `main` without the **publish** input, or use:
 
 ```sh
-gh workflow run flatpak.yml --ref main -f cache_only=true
+gh workflow run flatpak.yml --ref main
 ```
 
-Refresh it before releases when needed. GitHub removes caches unused for
-more than seven days and evicts older entries when the repository's storage
-limit is reached; see its [cache access and retention rules](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
+Run this from the package repository's checkout.
 
 ### Publishing
 
-When the repository variable `PUBLISH_FLATPAK` is `true`, pushing a
-stable version tag builds and publishes a signed Flatpak repository to
-GitHub Pages. A manual Flatpak run on `main` without **cache_only** also
-publishes, so packaging fixes can be shipped without a new upstream release.
-Pull request builds,
-prerelease builds and manual builds on other branches produce bundle
-artifacts without publishing. After a tag build passes, the workflow
-creates its GitHub Release using the runner's `GITHUB_TOKEN` and attaches
-the tested `artemis-x86_64.flatpak` bundle. Stable publication must complete
-the Pages deployment before release creation. If publication is disabled,
-tag builds still create GitHub Releases with their bundles. Manual runs on
-version tags follow the same release flow unless **cache_only** is selected.
-Reruns replace assets on an existing release and finish publishing a draft
-left by an interrupted run.
-Prerelease tags produce GitHub prereleases and cannot become the latest
-stable release.
+With the repository variable `PUBLISH_FLATPAK` set to `true`, pushing a
+stable version tag publishes a signed Flatpak repository to GitHub Pages.
+Manual runs build and test only unless the **publish** input is selected;
+they can publish from `main`, so packaging fixes can ship without a new
+upstream release. Pull requests and prerelease tags never publish. Runs that
+can publish wait for one another, so a tag pushed during another publication
+isn't built from an outdated repository head.
 
 A separate job, which never runs upstream build code, downloads the
-published repository and checks it against the signing key.
-It adds the tested builds of all architectures as new signed commits,
-generates static deltas, signs a new software catalog and summary, and
-writes `artemis.flatpakrepo` and `artemis.flatpakref` with the public key
-embedded. Both files take the app's
-summary from its metainfo and point to a copy of its icon, which software
-centers show when the remote or app is added. Before deploying, a fresh
-remote that only knows the public key must accept the result.
+published repository and checks it against the signing key. It adds the
+tested builds of all architectures as new signed commits, generates static
+deltas, signs a new software catalog and summary, and writes
+`artemis.flatpakrepo` and `artemis.flatpakref` with the public key embedded.
+Both files take the app's summary from its metainfo and point to a copy of
+its icon, which software centers show when the remote or app is added.
+Before deploying, a fresh remote that only knows the public key must accept
+the summary, every app and extension commit, and each architecture's
+software catalog.
 
 The repository keeps the five previous versions of the app and each
 extension, so users can go back to one with `flatpak update --commit`. A
-build whose files didn't change adds no version. Static deltas let Flatpak
-download an install or update as a few large files instead of one request
-per file. They add about a third to the repository's size, and each kept
-version adds only the files that changed. If the published repository can't
-be downloaded or doesn't match the signing key, for example after replacing
-the key, the job fails. Set the variable `FLATPAK_KEEP_HISTORY` to `false`
-to publish a new repository without the earlier versions.
+build whose files didn't change adds no version. A build older than the
+published one, such as a rerun of an earlier tag or a packaging revision
+before the current version, is refused, because it would become the head and
+downgrade users on their next update. Static deltas let Flatpak download an
+install or update as a few large files instead of one request per file. They
+add about a third to the repository's size, and each kept version adds only
+the files that changed. If the published repository can't be downloaded or
+doesn't match the signing key, for example after replacing the key, the job
+fails. Set the variable `FLATPAK_KEEP_HISTORY` to `false` to publish a new
+repository without the earlier versions.
 
 The repository URL defaults to `https://OWNER.github.io/REPOSITORY/`. For a
-custom domain, set the `FLATPAK_REPO_URL` variable to the real URL,
-including the trailing slash.
+custom domain, set the `FLATPAK_REPO_URL` variable to the real URL. The
+trailing slash is optional.
 
 To set publishing up:
 
-1. In **Settings → Pages**, select **GitHub Actions** as the source. If the
-   `github-pages` environment restricts deployment branches and tags, allow
-   a Tag rule for `v*` and retain a Branch rule for `main` for manual
-   publishing. Branch and tag rules are separate.
+1. In **Settings → Pages**, select **GitHub Actions** as the source.
 2. Store the signing key as the secret `FLATPAK_GPG_PRIVATE_KEY` (see
    below).
 3. Set the variable:
    `gh variable set PUBLISH_FLATPAK --body true --repo nosini/artemis-flatpak`.
-4. Push a version tag pointing to the packaging commit to build, or run the
-   Flatpak workflow manually on `main`.
+4. In **Settings → Environments → github-pages**, allow version tags to
+   deploy. With **Selected branches and tags**, add a **Tag** rule `v*` and
+   retain the **Branch** rule `main` for manual publication. These are
+   separate rules; allowing `main` alone does not allow tags. See GitHub's
+   [deployment branch and tag rules](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments#deployment-branches-and-tags).
+5. Push a stable version tag pointing to the packaging commit to build, or
+   run the Flatpak workflow manually on `main` with **publish** selected.
 
 Stable tags follow Artemis's four-part version, for example
 `v1.2026.0101.2`. A numeric suffix such as `v1.2026.0101.2-1` is a stable
 packaging revision of the same upstream version. Other suffixes, such as
 `v1.2026.0101.2-rc1`, produce prereleases without replacing the stable
-Flatpak repository. Tag the packaging commit containing the intended pins
-and workflow; creating the GitHub Release manually is unnecessary:
+Flatpak repository. The workflow fails a stable tag whose version, without a
+numeric packaging suffix, isn't the newest release in the metainfo file. Tag
+the packaging commit containing the intended pins and workflow; creating the
+GitHub Release manually is unnecessary:
 
 ```sh
 git tag -s v1.2026.0101.2 -m 'Artemis 1.2026.0101.2'
 git push origin v1.2026.0101.2
 ```
+
+### Releases
+
+After all architecture builds and tests succeed, and after signing,
+verification and Pages deployment succeed when publication is enabled, a
+separate job creates the GitHub Release and attaches the tested
+`artemis-x86_64.flatpak` bundle. It uses the runner's `GITHUB_TOKEN` with
+`contents: write`; no manual GitHub Release or additional release token is
+needed. With `PUBLISH_FLATPAK` disabled, tag builds still create a release
+with their bundles. Manual branch builds do not create releases, and manual
+runs on version tags create one only with the **publish** input selected.
+
+Reruns replace matching assets on an existing release, finish an interrupted
+draft after uploading its assets, and enforce prerelease status before
+uploading assets for prerelease tags. Release assets must remain mutable for
+replacement on reruns. Release publication does not trigger another
+packaging build. Bundles remain unsigned; signed updates come from the
+Flatpak repository.
 
 ### Signing key
 
@@ -324,8 +346,52 @@ updates.
 
 [flatpak-repo](https://github.com/nosini/flatpak-repo) collects the
 published packages into the shared `nosini` remote. After the first
-publication, add an entry for this app to its `apps.json`, listing every
-extension the build exports (`Locale` when the app has translations).
+publication, add an entry for this app to its `apps.json`, with the URL of
+its `.flatpakref` and the fingerprint of its signing key:
+
+```json
+{
+  "flatpakref": "https://nosini.github.io/artemis-flatpak/artemis.flatpakref",
+  "key": "1C7AFF2190E0AEFCC341BB8DF9BC4CD6377BEF26"
+}
+```
+
+This app is already listed there. The fingerprint is printed by
+
+```sh
+curl -fsS https://nosini.github.io/artemis-flatpak/artemis.flatpakref \
+  | sed -n 's/^GPGKey=//p' | base64 -d | gpg --show-keys
+```
+
+Compare it with the key in this repository's `FLATPAK_GPG_PRIVATE_KEY`
+secret before trusting it.
+
+After a successful Pages deployment, the `announce` job sends an
+`app-published` event to the collector, so the shared remote picks up the
+update without waiting for its six-hour schedule. Failed deployments,
+prereleases and manual builds without the **publish** input don't announce a
+publication. A failed notification leaves the published repository intact;
+rerun the failed job after correcting the token, or start collection
+manually.
+
+Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new)
+with access to `nosini/flatpak-repo` only and **Contents: Read and write**.
+Store it in this repository as `FLATPAK_REPO_DISPATCH_TOKEN`:
+
+```sh
+gh secret set FLATPAK_REPO_DISPATCH_TOKEN --repo nosini/artemis-flatpak
+```
+
+Enter the token at the prompt. The workflow passes it only to the
+notification job, which neither checks out nor builds code. The job fails
+with a clear error if the secret is missing. GitHub's default `GITHUB_TOKEN`
+can't send events to a different repository.
+
+To collect a release that has already been published:
+
+```sh
+gh workflow run publish.yml --repo nosini/flatpak-repo --ref main
+```
 
 ## Updating
 
@@ -395,15 +461,35 @@ The list includes some packages in several versions, Avalonia for example.
 NuGet downloads every version it considers while resolving dependencies, and
 the offline restore needs the same ones.
 
+The generated file pins exact packages, so it changes only when the script
+runs. Dependabot tracks the GitHub Actions but not these entries. To pick up
+upstream releases, including security fixes, rerun the script before a
+release and commit the changed `nuget-sources.json`; nothing in CI
+regenerates it.
+
 `scripts/tests/test-generate-dotnet-deps.sh` tests the script with a fake
 `flatpak` command and a local repository.
 
 ## Moving to a newer runtime or .NET
 
-For a new runtime, change `runtime-version` in the manifest and the image
-tag in `.github/workflows/flatpak.yml` (`freedesktop-26.08`), make sure the
-`org.freedesktop.Sdk.Extension.dotnet10` extension exists for it, and
-regenerate the NuGet sources.
+For a new runtime, change `runtime-version` in the manifest. The container
+image tag `freedesktop-VERSION` appears twice in
+`.github/workflows/flatpak.yml`, in the `build` and `publish` jobs, and
+again in the `publishing` job of `.github/workflows/checks.yml`; keep all
+three in step with the manifest. Each is pinned by digest
+(`freedesktop-VERSION@sha256:...`), because the publish job imports the
+signing key inside it and the tag can be moved. Dependabot doesn't update
+these, so look up the new tag's digest, for example with
+`skopeo inspect --format '{{.Digest}}'
+docker://ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-VERSION`,
+and refresh it the same way to pick up a rebuilt image. The actions are
+pinned by commit, which Dependabot keeps updated, and the actionlint download
+in `checks.yml` by checksum; update its version and checksum by hand.
+`checks.yml` also pins the runtime's Python in `python-version` for the
+script tests; change it when the runtime's Python version changes.
+
+Make sure the `org.freedesktop.Sdk.Extension.dotnet10` extension exists for
+the new runtime, and regenerate the NuGet sources.
 
 When Artemis moves to a newer .NET, replace `dotnet10` everywhere: the
 manifest's `sdk-extensions` and `build-options`, the publish command's

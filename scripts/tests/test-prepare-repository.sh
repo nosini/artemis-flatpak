@@ -59,7 +59,8 @@ build() {
     cat > "$dir/app/files/share/metainfo/$APP_ID.metainfo.xml" <<EOF
 <?xml version="1.0"?>
 <component type="desktop-application"><id>$APP_ID</id><name>Test</name>
-<summary xml:lang="de">Ein Test</summary><summary>A test  &amp; more</summary></component>
+<summary xml:lang="de">Ein Test</summary><summary>A test  &amp; more</summary>
+<releases><release version="$version" date="2026-01-01"/></releases></component>
 EOF
     cp "$tmp/icon.png" "$dir/app/files/share/app-info/icons/flatpak/128x128/$APP_ID.png"
     printf '<components version="0.14" origin="%s"><component type="desktop-application"><id>%s</id><name>Test</name><summary>A test</summary></component></components>\n' \
@@ -115,6 +116,19 @@ cmp -s "$tmp/icon.png" "$tmp/site/test.png" || fail 'icon not published'
 [[ -n "$(find "$tmp/site/deltas" -name superblock)" ]] || fail 'no static deltas'
 grep -q '^\[remote' "$tmp/site/config" && fail 'the download remote was published'
 
+# A repository URL without its trailing slash still finds the published
+# repository, and the URLs written to the install files keep their separator.
+build v1b 1.0 x86_64 aarch64
+rm -rf "$tmp/work"
+mkdir "$tmp/work"
+(cd "$tmp/work" && REPO_URL=${REPO_URL%/} bash "$script" "$tmp"/v1b-*/repo) \
+  > "$tmp/publish.log" 2>&1 \
+  || { cat "$tmp/publish.log" >&2; fail 'publishing without the trailing slash failed'; }
+grep -q 'starting a new repository' "$tmp/publish.log" \
+  && fail 'a missing trailing slash started a new repository'
+grep -qx "Icon=${REPO_URL}test.png" "$tmp/work/signed-repo/test.flatpakrepo" \
+  || fail 'the icon URL lost the separator before the file name'
+
 # A new version becomes the child of the published one; the old one stays
 # signed and available.
 first=$(ostree --repo="$tmp/site" rev-parse "$(app_ref)")
@@ -150,6 +164,32 @@ ostree --repo="$tmp/site" refs | grep -q aarch64 && fail 'aarch64 refs were kept
 build v5 5.0 x86_64
 KEEP_HISTORY=false publish v5
 [[ "$(versions)" == 1 ]] || fail 'KEEP_HISTORY=false kept earlier versions'
+
+# A build older than the published one would replace the head and downgrade
+# every user on their next update.
+build v4old 4.0 x86_64
+rm -rf "$tmp/work"
+mkdir "$tmp/work"
+if (cd "$tmp/work" && bash "$script" "$tmp"/v4old-*/repo) > "$tmp/publish.log" 2>&1; then
+  fail 'a build older than the published one was published'
+fi
+grep -q 'Refusing to publish 4.0 over the published 5.0' "$tmp/publish.log" \
+  || fail 'the older build was not reported'
+
+# An input that yields no refs must not delete the published architecture.
+build v5b 5.0 x86_64 aarch64
+publish v5b
+mkdir -p "$tmp/broken-aarch64/repo"
+rm -rf "$tmp/work"
+mkdir "$tmp/work"
+if (cd "$tmp/work" && bash "$script" "$tmp/v5b-x86_64/repo" "$tmp/broken-aarch64/repo") \
+  > "$tmp/publish.log" 2>&1; then
+  fail 'an input without refs was published'
+fi
+grep -q 'contains no app or runtime refs' "$tmp/publish.log" \
+  || fail 'the empty input was not reported'
+ostree --repo="$tmp/site" refs | grep -q aarch64 \
+  || fail 'the published aarch64 refs were dropped'
 
 # A published repository that doesn't match the key stops publication.
 mv "$GNUPGHOME" "$tmp/gnupg-old"

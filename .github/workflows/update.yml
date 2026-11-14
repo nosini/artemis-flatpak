@@ -33,7 +33,7 @@ jobs:
         # Unlike the default shell, this one fails on errors inside pipelines.
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # The whole history, to tell the bot's commits on the update branch
           # from changes made by people.
